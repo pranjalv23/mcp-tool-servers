@@ -125,6 +125,15 @@ class VectorDB:
 
     def upsert_reports(self, ticker: str, reports_data: list[dict[str, Any]]):
         """Chunk and upsert financial reports for a ticker."""
+        from datetime import datetime, timezone
+        fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        try:
+            self.index.delete(filter={"ticker": {"$eq": ticker}})
+            logger.info("Deleted existing chunks for %s", ticker)
+        except Exception as e:
+            logger.warning("Failed to delete existing chunks for %s (ignored): %s", ticker, e)
+
         total_chunks = 0
         for report in reports_data:
             doc_id = f"{ticker}_{report['period']}_{report['type'].replace(' ', '_')}"
@@ -133,12 +142,26 @@ class VectorDB:
                 "title": report["title"],
                 "period": report["period"],
                 "type": report["type"],
+                "fetched_at": fetched_at,
             }
             total_chunks += self.upsert_chunks(doc_id, report["content"], metadata)
-        logger.info("Upserted %d chunks for ticker='%s'", total_chunks, ticker)
+        logger.info("Upserted %d chunks for ticker='%s' (fetched_at=%s)", total_chunks, ticker, fetched_at)
 
     def reports_exist(self, ticker: str) -> bool:
         return self.check_identifier(ticker, filter_key="ticker")
+
+    def get_last_fetched(self, ticker: str) -> str | None:
+        """Return the fetched_at date string for the most recently stored reports, or None."""
+        dummy_vector = [0.1] + [0.0] * (self._DIMENSIONS[self.provider] - 1)
+        results = self.index.query(
+            vector=dummy_vector,
+            top_k=1,
+            filter={"ticker": {"$eq": ticker}},
+            include_metadata=True,
+        )
+        if results.matches:
+            return results.matches[0].metadata.get("fetched_at")
+        return None
 
     # ---- Research papers ----
 

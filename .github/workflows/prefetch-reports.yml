@@ -1,0 +1,51 @@
+name: Pre-fetch Financial Reports
+
+on:
+  schedule:
+    # Run every Sunday at 2:00 AM UTC (7:30 AM IST)
+    # Quarterly reports update ~4x per year, weekly is sufficient
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force refresh even if reports exist'
+        required: false
+        default: false
+        type: boolean
+      nifty_only:
+        description: 'Only fetch Nifty 50 (skip Sensex BSE duplicates)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  prefetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install --no-root
+
+      - name: Run pre-fetch script
+        env:
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          if [ "${{ inputs.nifty_only }}" = "true" ]; then
+            ARGS="$ARGS --nifty-only"
+          fi
+          poetry run python scripts/prefetch_reports.py $ARGS
