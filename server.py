@@ -434,4 +434,4 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8010))
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
