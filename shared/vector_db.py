@@ -5,8 +5,7 @@ from typing import Any
 
 import pymupdf4llm
 from pinecone import Pinecone, ServerlessSpec
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
+from langchain_azure_ai.embeddings import AzureAIOpenAIApiEmbeddingsModel
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger("mcp_tool_servers.vector_db")
@@ -23,23 +22,18 @@ class VectorDB:
     Supports both 'financial-reports' and 'research-papers' indices.
     """
 
-    _DIMENSIONS = {"gemini": 3072, "nvidia": 4096}
+    _DIMENSIONS = {"azure": 3072}
 
-    def __init__(self, index_name: str, provider: str = "nvidia"):
+    def __init__(self, index_name: str, provider: str = "azure"):
         self.provider = provider
         self.index_name = index_name
         self.pinecone = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
-        if provider == "gemini":
-            self.embeddings = GoogleGenerativeAIEmbeddings(
-                model="gemini-embedding-2-preview",
-                google_api_key=os.getenv("GEMINI_API_KEY"),
-            )
-        else:
-            self.embeddings = NVIDIAEmbeddings(
-                model="nvidia/nv-embed-v1",
-                nvidia_api_key=os.getenv("NVIDIA_API_KEY"),
-            )
+        self.embeddings = AzureAIOpenAIApiEmbeddingsModel(
+            endpoint=os.environ["AZURE_AI_FOUNDRY_ENDPOINT"],
+            credential=os.environ["AZURE_AI_FOUNDRY_API_KEY"],
+            model="text-embedding-3-large",
+        )
 
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=_CHUNK_SIZE,
