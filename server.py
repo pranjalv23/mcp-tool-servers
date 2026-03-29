@@ -28,6 +28,7 @@ mcp = FastMCP("mcp-tool-servers", instructions="Web search, finance data, and ve
 _tavily_client = None
 _firecrawl_app = None
 _arxiv_client = arxiv.Client()
+_db_instances = {}
 
 
 def _get_tavily() -> TavilyClient:
@@ -45,7 +46,9 @@ def _get_firecrawl() -> FirecrawlApp:
 
 
 def _get_db(index_name: str) -> VectorDB:
-    return VectorDB(index_name=index_name)
+    if index_name not in _db_instances:
+        _db_instances[index_name] = VectorDB(index_name=index_name)
+    return _db_instances[index_name]
 
 
 # ── Web Search Tools ──────────────────────────────────────────
