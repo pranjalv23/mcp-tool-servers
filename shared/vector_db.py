@@ -41,13 +41,23 @@ class VectorDB:
         )
         self._ensure_index()
 
-    def _ensure_index(self):
+    def _ensure_index(self, allow_recreation: bool = False):
         expected_dim = self._DIMENSIONS[self.provider]
         existing = {idx.name: idx for idx in self.pinecone.list_indexes()}
 
         if self.index_name in existing:
             current_dim = existing[self.index_name].dimension
             if current_dim != expected_dim:
+                if not allow_recreation:
+                    raise ValueError(
+                        f"Index '{self.index_name}' exists with dimension {current_dim} "
+                        f"but expected {expected_dim}. Set allow_recreation=True to delete "
+                        f"and recreate, or delete the index manually."
+                    )
+                logger.error(
+                    "Dimension mismatch for '%s' (current=%d, expected=%d) — deleting and recreating index",
+                    self.index_name, current_dim, expected_dim,
+                )
                 self.pinecone.delete_index(self.index_name)
                 existing.pop(self.index_name)
 
@@ -118,19 +128,24 @@ class VectorDB:
     # ---- Financial reports ----
 
     def upsert_reports(self, ticker: str, reports_data: list[dict[str, Any]]):
-        """Chunk and upsert financial reports for a ticker."""
+        """Chunk and upsert financial reports for a ticker.
+
+        Uses a write-then-swap pattern: new chunks are written with a fresh
+        fetched_at timestamp, and old chunks are only deleted after all new
+        chunks have been successfully upserted.  This prevents data loss if
+        the upsert fails partway through.
+        """
         from datetime import datetime, timezone
-        fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        try:
-            self.index.delete(filter={"ticker": {"$eq": ticker}})
-            logger.info("Deleted existing chunks for %s", ticker)
-        except Exception as e:
-            logger.warning("Failed to delete existing chunks for %s (ignored): %s", ticker, e)
+        # Fetch the old fetched_at so we can selectively delete stale chunks later
+        old_fetched_at = self.get_last_fetched(ticker)
 
+        # Phase 1: Upsert all new chunks (tagged with the new fetched_at)
         total_chunks = 0
+        new_ids: list[str] = []
         for report in reports_data:
-            doc_id = f"{ticker}_{report['period']}_{report['type'].replace(' ', '_')}"
+            doc_id_base = f"{ticker}_{fetched_at}_{report['period']}_{report['type'].replace(' ', '_')}"
             metadata = {
                 "ticker": ticker,
                 "title": report["title"],
@@ -138,8 +153,33 @@ class VectorDB:
                 "type": report["type"],
                 "fetched_at": fetched_at,
             }
-            total_chunks += self.upsert_chunks(doc_id, report["content"], metadata)
-        logger.info("Upserted %d chunks for ticker='%s' (fetched_at=%s)", total_chunks, ticker, fetched_at)
+            chunks = self.splitter.split_text(report["content"])
+            vectors = self.embeddings.embed_documents(chunks)
+            upsert_data = []
+            for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                chunk_id = f"{doc_id_base}_chunk_{i}"
+                new_ids.append(chunk_id)
+                meta = {**metadata, "chunk_index": i, "text": chunk}
+                upsert_data.append({"id": chunk_id, "values": vector, "metadata": meta})
+            for i in range(0, len(upsert_data), _UPSERT_BATCH):
+                self.index.upsert(vectors=upsert_data[i:i + _UPSERT_BATCH])
+            total_chunks += len(chunks)
+
+        logger.info("Upserted %d new chunks for ticker='%s' (fetched_at=%s)", total_chunks, ticker, fetched_at)
+
+        # Phase 2: Delete old chunks only after all new chunks are written
+        if old_fetched_at and old_fetched_at != fetched_at:
+            try:
+                self.index.delete(filter={
+                    "ticker": {"$eq": ticker},
+                    "fetched_at": {"$eq": old_fetched_at},
+                })
+                logger.info("Deleted old chunks for %s (fetched_at=%s)", ticker, old_fetched_at)
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete old chunks for %s (old data may linger): %s",
+                    ticker, e,
+                )
 
     def reports_exist(self, ticker: str) -> bool:
         return self.check_identifier(ticker, filter_key="ticker")

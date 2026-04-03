@@ -5,6 +5,7 @@ import time
 
 import requests
 import yfinance as yf
+from cachetools import cached, TTLCache
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
@@ -20,6 +21,7 @@ mcp = FastMCP("finance-data", instructions="Financial market data and reports to
 
 
 @mcp.tool()
+@cached(cache=TTLCache(maxsize=100, ttl=1800))
 def get_ticker_data(ticker: str) -> str:
     """Get basic market data and company information for a given ticker symbol.
     For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g., 'RELIANCE.NS'.
@@ -42,6 +44,7 @@ def get_ticker_data(ticker: str) -> str:
 
 
 @mcp.tool()
+@cached(cache=TTLCache(maxsize=100, ttl=21600))
 def get_bse_nse_reports(ticker: str) -> str:
     """Fetch raw quarterly and yearly financial reports (Income Statement, Balance Sheet, Cash Flow)
     for a given ticker (use .NS or .BO suffix for Indian stocks).
@@ -60,21 +63,31 @@ def get_bse_nse_reports(ticker: str) -> str:
             ("Quarterly Cash Flow", lambda: t.quarterly_cashflow),
         ]
 
+        missing: list[str] = []
         for title, fetch_fn in report_sources:
             try:
                 df = fetch_fn()
                 if not df.empty:
                     results.append(f"## {ticker} {title}\n\n{df.to_markdown()}")
+                else:
+                    missing.append(title)
             except Exception as e:
                 logger.warning("Failed to fetch %s for %s: %s", title, ticker, e)
+                missing.append(title)
 
-        return "\n\n---\n\n".join(results) if results else f"No financial reports found for {ticker}"
+        if not results:
+            return f"No financial reports found for {ticker}"
+        output = "\n\n---\n\n".join(results)
+        if missing:
+            output += f"\n\n**Note:** The following reports were unavailable: {', '.join(missing)}."
+        return output
     except Exception as e:
         logger.error("Error fetching financial reports for ticker='%s': %s", ticker, e)
         return f"Failed to fetch reports for {ticker}: {e}"
 
 
 @mcp.tool()
+@cached(cache=TTLCache(maxsize=100, ttl=3600))
 def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d") -> str:
     """Get price history summary and trend analysis for a ticker symbol.
     Returns multi-timeframe returns, monthly price series, moving averages, and volume.
@@ -162,12 +175,14 @@ def get_macro_indicators() -> str:
     lines = ["## Indian & Global Macro Indicators",
              "*(For RBI repo rate / CPI / IIP use tavily_quick_search)*", ""]
     fetched = 0
+    failed: list[str] = []
     for symbol, label in indicators:
         try:
             info = yf.Ticker(symbol).fast_info
             price = info.last_price
             prev = info.previous_close
             if price is None:
+                failed.append(label)
                 continue
             if prev and prev != 0:
                 chg = ((price - prev) / prev) * 100
@@ -178,9 +193,13 @@ def get_macro_indicators() -> str:
             fetched += 1
         except Exception as e:
             logger.warning("Skipping %s (%s): %s", symbol, label, e)
+            failed.append(label)
 
     if fetched == 0:
         return "Failed to fetch macro indicators. Use tavily_quick_search for current data."
+
+    if failed:
+        lines.append(f"\n**Unavailable:** {', '.join(failed)} — use tavily_quick_search for these.")
 
     result = "\n".join(lines)
     _macro_cache[cache_key] = (now, result)
