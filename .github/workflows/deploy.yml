@@ -19,9 +19,44 @@ jobs:
           script: |
             set -e
             cd ~/repos/mcp-tool-servers
+
+            PREV_REV=$(git rev-parse HEAD)
+
             git fetch --tags
             git checkout ${{ github.ref_name }}
+
             cd ~/deploy
-            docker compose build --no-cache mcp-tool-servers
-            docker compose up -d --no-deps mcp-tool-servers
-            docker image prune -f || true
+            if docker compose build --no-cache mcp-tool-servers && \
+               docker compose up -d --no-deps mcp-tool-servers; then
+
+              echo "Deployment of mcp-tool-servers (${{ github.ref_name }}) successful."
+              docker image prune -f || true
+
+              echo "Waiting for mcp-tool-servers health check..."
+              for i in $(seq 1 12); do
+                if docker compose ps mcp-tool-servers | grep -q "(healthy)"; then
+                  echo "Service is healthy."
+                  exit 0
+                fi
+                if [ "$i" -eq "12" ]; then
+                  echo "ERROR: mcp-tool-servers did not become healthy after 60s — rolling back..."
+                  cd ~/repos/mcp-tool-servers
+                  git checkout "${PREV_REV}"
+                  cd ~/deploy
+                  docker compose build --no-cache mcp-tool-servers
+                  docker compose up -d --no-deps mcp-tool-servers
+                  echo "Rollback complete."
+                  exit 1
+                fi
+                sleep 5
+              done
+            else
+              echo "ERROR: Build/start failed. Rolling back to ${PREV_REV}..."
+              cd ~/repos/mcp-tool-servers
+              git checkout "${PREV_REV}"
+              cd ~/deploy
+              docker compose build --no-cache mcp-tool-servers
+              docker compose up -d --no-deps mcp-tool-servers
+              echo "Rollback complete."
+              exit 1
+            fi
