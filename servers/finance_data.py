@@ -20,6 +20,198 @@ logger = logging.getLogger("mcp_tool_servers.finance_data")
 
 mcp = FastMCP("finance-data", instructions="Financial market data and reports tools.")
 
+# ── Indian ticker alias table ── keys are lowercase normalized inputs, values are bare NSE symbols ──
+_INDIAN_TICKER_ALIASES: dict[str, str] = {
+    # PSU Banks
+    "sbi": "SBIN", "state bank": "SBIN", "state bank of india": "SBIN", "sbin": "SBIN",
+    "pnb": "PNB", "punjab national bank": "PNB",
+    "bob": "BANKBARODA", "bank of baroda": "BANKBARODA", "bankbaroda": "BANKBARODA",
+    "boi": "BANKINDIA", "bank of india": "BANKINDIA", "bankindia": "BANKINDIA",
+    "ubi": "UNIONBANK", "union bank": "UNIONBANK", "union bank of india": "UNIONBANK", "unionbank": "UNIONBANK",
+    "canara": "CANBK", "canara bank": "CANBK", "canbk": "CANBK",
+    "uco": "UCOBANK", "uco bank": "UCOBANK", "ucobank": "UCOBANK",
+    "iob": "IOB", "indian overseas bank": "IOB",
+    "central bank": "CENTRALBK", "centralbk": "CENTRALBK",
+    "indian bank": "INDIANB", "indianb": "INDIANB",
+    "mahabank": "MAHABANK", "maharashtra bank": "MAHABANK",
+    # Private Banks
+    "hdfc bank": "HDFCBANK", "hdfcbank": "HDFCBANK", "hdfc": "HDFCBANK",
+    "icici bank": "ICICIBANK", "icicibank": "ICICIBANK", "icici": "ICICIBANK",
+    "axis bank": "AXISBANK", "axisbank": "AXISBANK", "axis": "AXISBANK",
+    "kotak": "KOTAKBANK", "kotak bank": "KOTAKBANK", "kotakbank": "KOTAKBANK",
+    "kotak mahindra bank": "KOTAKBANK",
+    "indusind": "INDUSINDBK", "indusind bank": "INDUSINDBK", "indusindbk": "INDUSINDBK",
+    "yes bank": "YESBANK", "yesbank": "YESBANK",
+    "idfc first": "IDFCFIRSTB", "idfc first bank": "IDFCFIRSTB", "idfcfirstb": "IDFCFIRSTB",
+    "federal bank": "FEDERALBNK", "federalbnk": "FEDERALBNK",
+    "bandhan bank": "BANDHANBNK", "bandhanbnk": "BANDHANBNK",
+    "rbl bank": "RBLBANK", "rblbank": "RBLBANK",
+    "karnataka bank": "KTKBANK", "ktkbank": "KTKBANK",
+    "south indian bank": "SOUTHBANK", "southbank": "SOUTHBANK",
+    # IT / Technology
+    "tcs": "TCS", "tata consultancy": "TCS", "tata consultancy services": "TCS",
+    "infy": "INFY", "infosys": "INFY",
+    "wipro": "WIPRO",
+    "hcl": "HCLTECH", "hcl tech": "HCLTECH", "hcltech": "HCLTECH", "hcl technologies": "HCLTECH",
+    "tech mahindra": "TECHM", "techm": "TECHM",
+    "ltimindtree": "LTIM", "lti mindtree": "LTIM", "ltim": "LTIM",
+    "mphasis": "MPHASIS",
+    "persistent": "PERSISTENT", "persistent systems": "PERSISTENT",
+    "coforge": "COFORGE",
+    "hexaware": "HEXAWARE",
+    # Large Caps / Nifty 50
+    "reliance": "RELIANCE", "ril": "RELIANCE", "reliance industries": "RELIANCE",
+    "itc": "ITC",
+    "hul": "HINDUNILVR", "hindustan unilever": "HINDUNILVR", "hindunilvr": "HINDUNILVR",
+    "bajaj finance": "BAJFINANCE", "bajfinance": "BAJFINANCE",
+    "bajaj finserv": "BAJAJFINSV", "bajajfinsv": "BAJAJFINSV",
+    "l&t": "LT", "lt": "LT", "larsen": "LT", "larsen and toubro": "LT",
+    "maruti": "MARUTI", "maruti suzuki": "MARUTI",
+    "tata motors": "TATAMOTORS", "tatamotors": "TATAMOTORS",
+    "m&m": "M&M", "mahindra": "M&M", "mahindra and mahindra": "M&M",
+    "hero motocorp": "HEROMOTOCO", "heromotoco": "HEROMOTOCO",
+    "bajaj auto": "BAJAJ-AUTO", "bajaj-auto": "BAJAJ-AUTO",
+    "tata steel": "TATASTEEL", "tatasteel": "TATASTEEL",
+    "jsw steel": "JSWSTEEL", "jswsteel": "JSWSTEEL",
+    "hindalco": "HINDALCO",
+    "vedanta": "VEDL", "vedl": "VEDL",
+    "ntpc": "NTPC",
+    "powergrid": "POWERGRID", "power grid": "POWERGRID",
+    "ongc": "ONGC",
+    "coal india": "COALINDIA", "coalindia": "COALINDIA",
+    "bpcl": "BPCL", "bharat petroleum": "BPCL",
+    "hpcl": "HPCL", "hindustan petroleum": "HPCL",
+    "ioc": "IOC", "iocl": "IOC", "indian oil": "IOC",
+    "gail": "GAIL",
+    "sun pharma": "SUNPHARMA", "sunpharma": "SUNPHARMA",
+    "dr reddy": "DRREDDY", "drreddy": "DRREDDY", "dr reddys": "DRREDDY",
+    "cipla": "CIPLA",
+    "divis": "DIVISLAB", "divis lab": "DIVISLAB", "divislab": "DIVISLAB",
+    "apollo hospitals": "APOLLOHOSP", "apollohosp": "APOLLOHOSP",
+    "asian paints": "ASIANPAINT", "asianpaint": "ASIANPAINT",
+    "nestle india": "NESTLEIND", "nestleind": "NESTLEIND",
+    "britannia": "BRITANNIA",
+    "adani ports": "ADANIPORTS", "adaniports": "ADANIPORTS",
+    "adani green": "ADANIGREEN", "adanigreen": "ADANIGREEN",
+    "adani ent": "ADANIENT", "adanient": "ADANIENT", "adani enterprises": "ADANIENT",
+    "adani total gas": "ATGL", "atgl": "ATGL",
+    "tata consumer": "TATACONSUM", "tataconsum": "TATACONSUM",
+    "ultracemco": "ULTRACEMCO", "ultratech cement": "ULTRACEMCO",
+    "shree cement": "SHREECEM", "shreecem": "SHREECEM",
+    "acc": "ACC", "acc cement": "ACC",
+    "ambuja cement": "AMBUJACEM", "ambujacem": "AMBUJACEM",
+    "siemens": "SIEMENS",
+    "abb india": "ABB", "abb": "ABB",
+    "bhel": "BHEL",
+    "irfc": "IRFC",
+    "lic": "LICI", "lici": "LICI", "life insurance corporation": "LICI",
+    "sbi life": "SBILIFE", "sbilife": "SBILIFE",
+    "hdfc life": "HDFCLIFE", "hdfclife": "HDFCLIFE",
+    "icici prudential": "ICICIPRULI", "icicipruli": "ICICIPRULI",
+    "zomato": "ZOMATO",
+    "paytm": "PAYTM",
+    "nykaa": "FSN", "fsn": "FSN",
+    "dmart": "DMART", "avenue supermarts": "DMART",
+    "titan": "TITAN",
+    "havells": "HAVELLS",
+    "voltas": "VOLTAS",
+    "pidilite": "PIDILITIND", "pidilitind": "PIDILITIND",
+    "berger paints": "BERGEPAINT", "bergepaint": "BERGEPAINT",
+    "godrej consumer": "GODREJCP", "godrejcp": "GODREJCP",
+    "dabur": "DABUR",
+    "colgate": "COLPAL", "colgate palmolive india": "COLPAL", "colpal": "COLPAL",
+    "marico": "MARICO",
+    "emami": "EMAMILTD", "emamiltd": "EMAMILTD",
+    "page industries": "PAGEIND", "pageind": "PAGEIND",
+    "info edge": "NAUKRI", "naukri": "NAUKRI",
+    "indigo": "INDIGO", "interglobe aviation": "INDIGO",
+    "irctc": "IRCTC",
+    "mrf": "MRF",
+    "tvs motor": "TVSMOTOR", "tvsmotor": "TVSMOTOR",
+    "eicher motors": "EICHERMOT", "eichermot": "EICHERMOT",
+    "srf": "SRF",
+    "pi industries": "PIIND", "piind": "PIIND",
+    "upl": "UPL",
+    "tata power": "TATAPOWER", "tatapower": "TATAPOWER",
+    "nhpc": "NHPC",
+    "torrent power": "TORNTPOWER", "torntpower": "TORNTPOWER",
+    "tata chemicals": "TATACHEM", "tatachem": "TATACHEM",
+    "tata elxsi": "TATAELXSI", "tataelxsi": "TATAELXSI",
+    "muthoot finance": "MUTHOOTFIN", "muthootfin": "MUTHOOTFIN",
+    "cholamandalam": "CHOLAFIN", "cholafin": "CHOLAFIN",
+    "l&t finance": "LTF", "ltf": "LTF",
+    "shriram finance": "SHRIRAMFIN", "shriramfin": "SHRIRAMFIN",
+    "hdfc amc": "HDFCAMC", "hdfcamc": "HDFCAMC",
+    "nippon amc": "NAM-INDIA", "nam-india": "NAM-INDIA",
+}
+
+
+@mcp.tool()
+def resolve_indian_ticker(company_name_or_symbol: str) -> str:
+    """Resolve an Indian company name, abbreviation, or partial symbol to the correct
+    NSE ticker (with .NS suffix) for use with all other finance tools.
+
+    Call this BEFORE get_ticker_data, get_bse_nse_reports, or get_historical_ohlcv
+    whenever the user provides a company name or abbreviation rather than an explicit
+    NSE/BSE ticker like 'RELIANCE.NS'.
+
+    Examples:
+      "SBI"       → "SBIN.NS  (State Bank of India)"
+      "UBI"       → "UNIONBANK.NS  (Union Bank of India)"
+      "HDFC Bank" → "HDFCBANK.NS  (HDFC Bank Limited)"
+
+    Returns a single line: "<NSE_TICKER>  (<confirmed company name>)"
+    On failure returns an error string explaining what was tried."""
+    logger.info("resolve_indian_ticker called with input='%s'", company_name_or_symbol)
+
+    normalized = company_name_or_symbol.lower().strip()
+    # Strip .ns/.bo so "SBIN.NS" normalizes to "sbin" — makes tool idempotent
+    if normalized.endswith(".ns"):
+        normalized = normalized[:-3]
+    elif normalized.endswith(".bo"):
+        normalized = normalized[:-3]
+
+    if normalized in _INDIAN_TICKER_ALIASES:
+        nse_symbol = _INDIAN_TICKER_ALIASES[normalized]
+        ticker_with_suffix = f"{nse_symbol}.NS"
+        logger.info("Alias table hit: '%s' → '%s'", company_name_or_symbol, ticker_with_suffix)
+        try:
+            name = yf.Ticker(ticker_with_suffix).fast_info.display_name or ticker_with_suffix
+        except Exception:
+            name = ticker_with_suffix
+        return f"{ticker_with_suffix}  ({name})"
+
+    # Fallback: yf.Search hits Yahoo Finance search API
+    logger.info("Alias miss for '%s', falling back to yf.Search", company_name_or_symbol)
+    try:
+        results = yf.Search(
+            company_name_or_symbol,
+            max_results=10,
+            news_count=0,
+            lists_count=0,
+        )
+        indian_quotes = [
+            q for q in results.quotes
+            if q.get("symbol", "").endswith((".NS", ".BO"))
+        ]
+        if indian_quotes:
+            best = indian_quotes[0]
+            symbol = best["symbol"]
+            name = best.get("shortname") or best.get("longname") or symbol
+            logger.info("yf.Search resolved '%s' → '%s' (%s)", company_name_or_symbol, symbol, name)
+            return f"{symbol}  ({name})"
+
+        return (
+            f"Could not resolve '{company_name_or_symbol}' to an Indian ticker. "
+            "Try the explicit NSE symbol directly (e.g. 'SBIN.NS')."
+        )
+    except Exception as e:
+        logger.error("yf.Search failed for '%s': %s", company_name_or_symbol, e)
+        return (
+            f"Ticker resolution failed for '{company_name_or_symbol}': {e}. "
+            "Try the explicit NSE symbol directly."
+        )
+
 
 @retry(
     stop=stop_after_attempt(3),
