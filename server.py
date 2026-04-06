@@ -26,6 +26,22 @@ logger = logging.getLogger("mcp_tool_servers")
 
 mcp = FastMCP("mcp-tool-servers", instructions="Web search, finance data, and vector DB tools.")
 
+
+def _clamp(value: int, min_val: int, max_val: int, name: str) -> int:
+    """Clamp *value* to [min_val, max_val]. Logs a warning when clamping occurs."""
+    clamped = max(min_val, min(value, max_val))
+    if clamped != value:
+        logger.warning("Parameter '%s' clamped from %d to %d", name, value, clamped)
+    return clamped
+
+
+_VALID_YFINANCE_PERIODS = frozenset({
+    "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max",
+})
+_VALID_YFINANCE_INTERVALS = frozenset({
+    "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo",
+})
+
 # ── Macro data cache (6-hour TTL) ──
 _macro_cache: dict[str, tuple[float, str]] = {}
 _CACHE_TTL = 6 * 3600
@@ -65,6 +81,7 @@ def _get_db(index_name: str) -> VectorDB:
 def tavily_quick_search(query: str, max_results: int = 3) -> str:
     """Perform a quick web search across the internet. Returns synthesized answers and snippets.
     Ideal for news, quick fact-checking, and broad questions."""
+    max_results = _clamp(max_results, 1, 10, "max_results")
     logger.info("Tavily search — query='%s', max_results=%d", query, max_results)
     try:
         client = _get_tavily()
@@ -166,6 +183,10 @@ def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d") 
     period options: 1mo, 3mo, 6mo, 1y, 2y, 5y
     interval options: 1d, 1wk, 1mo
     For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g., 'RELIANCE.NS'."""
+    if period not in _VALID_YFINANCE_PERIODS:
+        return f"Invalid period '{period}'. Valid options: {sorted(_VALID_YFINANCE_PERIODS)}"
+    if interval not in _VALID_YFINANCE_INTERVALS:
+        return f"Invalid interval '{interval}'. Valid options: {sorted(_VALID_YFINANCE_INTERVALS)}"
     logger.info("Fetching OHLCV history for ticker='%s', period='%s'", ticker, period)
     try:
         t = yf.Ticker(ticker)
@@ -370,6 +391,7 @@ def retrieve_from_vector_db(query: str, index_name: str, filter_key: str = "",
         filter_key: Optional metadata key to filter by (e.g., 'ticker')
         filter_value: Optional metadata value to filter by (e.g., 'RELIANCE.NS')
         top_k: Number of results to return"""
+    top_k = _clamp(top_k, 1, 50, "top_k")
     logger.info("Retrieving from vector DB — query='%s', index='%s'", query[:80], index_name)
     try:
         db = _get_db(index_name)
