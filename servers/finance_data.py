@@ -306,22 +306,23 @@ def get_bse_nse_reports(ticker: str) -> str:
     retry=retry_if_exception_type(Exception),
     reraise=True,
 )
-def _yf_get_history(ticker: str, period: str, interval: str):
+def _yf_get_history(ticker: str, period: str, interval: str, end_date: str | None = None):
     """Inner fetch for yfinance price history — retried on transient failures."""
-    return yf.Ticker(ticker).history(period=period, interval=interval)
+    return yf.Ticker(ticker).history(period=period, interval=interval, end=end_date)
 
 
 @mcp.tool()
 @cached(cache=TTLCache(maxsize=100, ttl=3600))
-def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d") -> str:
+def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d", end_date: str | None = None) -> str:
     """Get price history summary and trend analysis for a ticker symbol.
     Returns multi-timeframe returns, monthly price series, moving averages, and volume.
     period options: 1mo, 3mo, 6mo, 1y, 2y, 5y
     interval options: 1d, 1wk, 1mo
+    end_date: optional ISO date string (e.g. '2026-02-02') to cap history at a specific date
     For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g., 'RELIANCE.NS'."""
-    logger.info("Fetching OHLCV history for ticker='%s', period='%s'", ticker, period)
+    logger.info("Fetching OHLCV history for ticker='%s', period='%s', end_date=%s", ticker, period, end_date)
     try:
-        hist = _yf_get_history(ticker, period, interval)
+        hist = _yf_get_history(ticker, period, interval, end_date)
         if hist.empty:
             return f"No price history found for {ticker}."
 
