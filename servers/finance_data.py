@@ -493,6 +493,308 @@ def get_fii_dii_flows(days: int = 30) -> str:
         )
 
 
+@mcp.tool()
+@cached(cache=TTLCache(maxsize=100, ttl=3600))
+def get_dcf_inputs(ticker: str) -> str:
+    """Extract structured DCF inputs directly from financial statements for a ticker.
+
+    Returns a JSON object with all fields needed to call run_dcf immediately:
+      current_fcf_cr     — most recent annual Free Cash Flow in INR crores
+      growth_rate_pct    — 3-year FCF CAGR (%) capped at ±50%, use as initial growth_rate_pct
+      shares_outstanding_cr — total shares in crores
+      net_debt_cr        — totalDebt minus totalCash in crores (positive = net debt)
+      current_price      — latest market price
+
+    Use this BEFORE calling run_dcf so values come from actual financial data,
+    not guessed or hardcoded. Adjust growth_rate_pct based on analyst consensus
+    or sector outlook if you have better forward estimates.
+
+    For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g. 'JSWSTEEL.NS'.
+    """
+    import json
+
+    logger.info("get_dcf_inputs called for ticker='%s'", ticker)
+    try:
+        t = yf.Ticker(ticker)
+        info = _yf_get_info(ticker)
+
+        # ── shares outstanding → crores ──────────────────────────────────────
+        shares_raw = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        shares_outstanding_cr = round(shares_raw / 1e7, 2) if shares_raw else None
+
+        # ── current price ────────────────────────────────────────────────────
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if current_price:
+            current_price = round(float(current_price), 2)
+
+        # ── FCF from yearly cash flow statement → crores ────────────────────
+        fcf_values_cr: list[float] = []
+        try:
+            cf = _yf_fetch_report(lambda: t.cashflow)
+            if not cf.empty:
+                # Try "Free Cash Flow" row first
+                fcf_row = None
+                for label in cf.index:
+                    if "free cash flow" in str(label).lower():
+                        fcf_row = cf.loc[label]
+                        break
+                if fcf_row is None:
+                    # Fallback: Operating Cash Flow − |CapEx|
+                    ocf_row = next(
+                        (cf.loc[l] for l in cf.index
+                         if "operating" in str(l).lower() and "cash" in str(l).lower()),
+                        None,
+                    )
+                    capex_row = next(
+                        (cf.loc[l] for l in cf.index
+                         if "capital" in str(l).lower()
+                         and ("expenditure" in str(l).lower() or "capex" in str(l).lower())),
+                        None,
+                    )
+                    if ocf_row is not None and capex_row is not None:
+                        for o_val, c_val in zip(ocf_row.dropna().values[:4], capex_row.dropna().values[:4]):
+                            try:
+                                fcf_values_cr.append(round((float(o_val) - abs(float(c_val))) / 1e7, 2))
+                            except (ValueError, TypeError):
+                                pass
+                else:
+                    for v in fcf_row.dropna().values[:4]:
+                        try:
+                            fcf_values_cr.append(round(float(v) / 1e7, 2))
+                        except (ValueError, TypeError):
+                            pass
+        except Exception as e:
+            logger.warning("Could not extract FCF for %s: %s", ticker, e)
+
+        current_fcf_cr = fcf_values_cr[0] if fcf_values_cr else None
+
+        # ── 3-year FCF CAGR ──────────────────────────────────────────────────
+        growth_rate_pct = None
+        if (len(fcf_values_cr) >= 3
+                and fcf_values_cr[0] is not None
+                and fcf_values_cr[2] is not None
+                and fcf_values_cr[2] > 0
+                and fcf_values_cr[0] > 0):
+            try:
+                cagr = ((fcf_values_cr[0] / fcf_values_cr[2]) ** (1.0 / 2) - 1.0) * 100
+                growth_rate_pct = round(max(-50.0, min(50.0, cagr)), 1)
+            except (ValueError, ZeroDivisionError):
+                pass
+
+        # ── net debt → crores ────────────────────────────────────────────────
+        total_debt = float(info.get("totalDebt") or 0)
+        total_cash = float(info.get("totalCash") or 0)
+        net_debt_cr = round((total_debt - total_cash) / 1e7, 2)
+
+        fcf_history_note = (
+            "FCF last 4yr (cr): " + str(fcf_values_cr[:4])
+            if fcf_values_cr else "FCF data unavailable"
+        )
+
+        result: dict = {
+            "ticker": ticker,
+            "current_fcf_cr": current_fcf_cr,
+            "growth_rate_pct": growth_rate_pct,
+            "shares_outstanding_cr": shares_outstanding_cr,
+            "net_debt_cr": net_debt_cr,
+            "current_price": current_price,
+            "notes": (
+                f"{fcf_history_note}. "
+                "growth_rate_pct = 3yr FCF CAGR capped ±50% — adjust upward/downward based on "
+                "forward guidance or sector outlook. "
+                "net_debt_cr = totalDebt - totalCash. "
+                "Pass all fields directly to run_dcf."
+            ),
+        }
+
+        missing = [k for k, v in result.items() if v is None and k not in ("notes",)]
+        if missing:
+            result["warnings"] = (
+                f"Could not extract: {', '.join(missing)}. "
+                "You must supply these manually before calling run_dcf."
+            )
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        logger.error("get_dcf_inputs failed for '%s': %s", ticker, e)
+        return json.dumps({"error": f"Failed to extract DCF inputs for {ticker}: {e}"})
+
+
+@mcp.tool()
+@cached(cache=TTLCache(maxsize=100, ttl=900))
+def get_price_series(ticker: str, period: str = "1y") -> str:
+    """Return a JSON list of daily closing prices for a ticker, most recent last.
+
+    Pass the returned `closes` list directly as the `prices` argument to
+    calculate_technical_signals and calculate_risk_metrics — do NOT try to
+    extract prices from the markdown output of get_historical_ohlcv.
+
+    period options: 3mo, 6mo, 1y, 2y (default: 1y)
+    For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g. 'JSWSTEEL.NS'.
+    """
+    import json
+
+    logger.info("get_price_series called for ticker='%s', period='%s'", ticker, period)
+    try:
+        hist = _yf_get_history(ticker, period=period, interval="1d")
+        if hist.empty:
+            return json.dumps({"error": f"No price data found for {ticker}"})
+        closes = [round(float(v), 2) for v in hist["Close"].tolist()]
+        return json.dumps({
+            "ticker": ticker,
+            "period": period,
+            "count": len(closes),
+            "closes": closes,
+        })
+    except Exception as e:
+        logger.error("get_price_series failed for '%s': %s", ticker, e)
+        return json.dumps({"error": f"Failed to fetch price series for {ticker}: {e}"})
+
+
+@mcp.tool()
+def get_comparable_metrics(tickers: list[str]) -> str:
+    """Fetch structured valuation and quality metrics for a list of tickers.
+
+    Returns data formatted for direct use with run_comparable_valuation:
+      target_ticker  — first ticker in the list
+      target_metrics — PE, PB, EV/EBITDA, ROE, EBITDA margin, revenue growth
+      peers          — same metrics for each remaining ticker
+
+    Pass target_ticker, target_metrics, and peers directly to run_comparable_valuation.
+    For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g. ['JSWSTEEL.NS', 'TATASTEEL.NS'].
+    At least 2 tickers are recommended (1 target + 1 peer minimum).
+    """
+    import json
+
+    if not tickers:
+        return json.dumps({"error": "At least one ticker required"})
+
+    logger.info("get_comparable_metrics called for tickers=%s", tickers)
+
+    def _fetch_metrics(ticker: str) -> dict:
+        try:
+            info = _yf_get_info(ticker)
+            roe = info.get("returnOnEquity")
+            ebitda_m = info.get("ebitdaMargins")
+            rev_g = info.get("revenueGrowth")
+            rec: dict = {"ticker": ticker}
+            if info.get("trailingPE") is not None:
+                rec["pe"] = round(float(info["trailingPE"]), 2)
+            if info.get("priceToBook") is not None:
+                rec["pb"] = round(float(info["priceToBook"]), 2)
+            if info.get("enterpriseToEbitda") is not None:
+                rec["ev_ebitda"] = round(float(info["enterpriseToEbitda"]), 2)
+            if roe is not None:
+                rec["roe"] = round(float(roe) * 100, 2)          # fraction → %
+            if ebitda_m is not None:
+                rec["ebitda_margin"] = round(float(ebitda_m) * 100, 2)  # fraction → %
+            if rev_g is not None:
+                rec["revenue_growth"] = round(float(rev_g) * 100, 2)    # fraction → %
+            return rec
+        except Exception as e:
+            logger.warning("Could not fetch metrics for %s: %s", ticker, e)
+            return {"ticker": ticker, "error": str(e)}
+
+    all_metrics = [_fetch_metrics(t) for t in tickers]
+    target = all_metrics[0]
+    peers = all_metrics[1:]
+    target_metrics = {k: v for k, v in target.items() if k not in ("ticker", "error")}
+
+    missing = [t["ticker"] for t in all_metrics if "error" in t]
+    result: dict = {
+        "target_ticker": target["ticker"],
+        "target_metrics": target_metrics,
+        "peers": peers,
+    }
+    if missing:
+        result["warnings"] = f"Could not fetch metrics for: {', '.join(missing)}"
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_regime_inputs() -> str:
+    """Fetch and structure current Indian macro indicators as inputs for detect_market_regime.
+
+    Returns a JSON object whose field names match RegimeDetectorInput exactly:
+      india_vix, usd_inr, crude_brent, nifty_pe, fii_net_30d
+    Fields that require an external search (repo_rate, cpi_yoy, credit_growth, gsec_10y)
+    are listed in the `needs_search` array with suggested tavily queries.
+
+    Pass the returned values directly to detect_market_regime — do NOT use
+    the markdown output of get_macro_indicators for this purpose.
+    """
+    import json
+
+    logger.info("get_regime_inputs called")
+    result: dict = {}
+    warnings: list[str] = []
+
+    # ── Live market data from yfinance ──────────────────────────────────────
+    _yfin_map = {
+        "^INDIAVIX": "india_vix",
+        "USDINR=X": "usd_inr",
+        "BZ=F": "crude_brent",
+    }
+    for symbol, field in _yfin_map.items():
+        try:
+            val = yf.Ticker(symbol).fast_info.last_price
+            if val is not None:
+                result[field] = round(float(val), 2)
+            else:
+                warnings.append(f"{field} returned None from yfinance")
+        except Exception as e:
+            warnings.append(f"{field} unavailable: {e}")
+
+    # ── Nifty 50 PE from yfinance info ──────────────────────────────────────
+    try:
+        nifty_info = _yf_get_info("^NSEI")
+        pe = nifty_info.get("trailingPE")
+        if pe:
+            result["nifty_pe"] = round(float(pe), 1)
+        else:
+            warnings.append("nifty_pe not in yfinance ^NSEI info — use tavily_quick_search('Nifty 50 PE ratio today')")
+    except Exception as e:
+        warnings.append(f"nifty_pe unavailable: {e}")
+
+    # ── FII net 30-day flows from NSE ────────────────────────────────────────
+    try:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.nseindia.com/",
+        })
+        session.get("https://www.nseindia.com", timeout=10)
+        resp = session.get("https://www.nseindia.com/api/fiidiiTradeReact", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        fii_net = sum(
+            float(str(e.get("netValue", "0")).replace(",", ""))
+            for e in data[:30]
+            if "FII" in str(e.get("category", "")).upper()
+        )
+        result["fii_net_30d"] = round(fii_net, 2)
+    except Exception as e:
+        warnings.append(f"fii_net_30d unavailable from NSE: {e}")
+
+    # ── Fields that need search ──────────────────────────────────────────────
+    result["needs_search"] = {
+        "repo_rate": "tavily_quick_search('RBI repo rate India April 2026')",
+        "cpi_yoy": "tavily_quick_search('India CPI inflation YoY March 2026')",
+        "credit_growth": "tavily_quick_search('India bank credit growth YoY 2026')",
+        "gsec_10y": "tavily_quick_search('India 10 year G-sec yield today 2026')",
+    }
+    if warnings:
+        result["warnings"] = warnings
+
+    return json.dumps(result, indent=2)
+
+
 if __name__ == "__main__":
     from shared.config import PORTS
     mcp.run(transport="streamable-http", host="0.0.0.0", port=PORTS["finance-data"])
