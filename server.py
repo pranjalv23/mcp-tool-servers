@@ -996,33 +996,12 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
         return f"Error: Unexpected failure fetching {repo_full}: {exc}"
 
 
-# Factory function required for uvicorn multi-worker mode.
-# Each worker calls create_app() after forking, which creates a fresh
-# StreamableHTTPSessionManager per worker. stateless_http=True avoids session
-# tracking (correct for tool servers — each tool call is independent) and removes
-# the anyio.Lock() instances from StreamableHTTPSessionManager that can fail when
-# inherited across fork boundaries (mcp 1.27.0+).
-def create_app():
-    try:
-        return mcp.http_app(stateless_http=True)
-    except Exception:
-        logger.critical("create_app() failed in worker", exc_info=True)
-        raise
-
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8010))
-    workers = int(os.getenv("WEB_CONCURRENCY", 1))
-    if workers > 1:
-        uvicorn.run(
-            "server:create_app",
-            factory=True,
-            host="0.0.0.0",
-            port=port,
-            workers=workers,
-        )
-    else:
-        # Run in-process (no fork) so asyncio primitives created at module level
-        # bind to the same event loop uvicorn creates — no fork-safety issues.
-        uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)
+    # Run in-process (no multiprocess supervisor, no forking).
+    # uvicorn's asyncio event loop handles concurrent tool calls natively —
+    # all tool I/O (HTTP, Pinecone, yfinance) is async so no worker is ever blocked.
+    # Multi-worker (WEB_CONCURRENCY > 1) silently crashes because uvicorn's
+    # subprocess bootstrapping fails before create_app() is even called.
+    uvicorn.run(mcp.http_app(stateless_http=True), host="0.0.0.0", port=port)
