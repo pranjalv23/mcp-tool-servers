@@ -1,5 +1,6 @@
 """MCP server for vector DB tools (Pinecone). Port 8012."""
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -232,9 +233,9 @@ def _rerank_candidates(query: str, candidates: list[dict], top_n: int) -> list[d
 
 
 @mcp.tool()
-def download_and_store_arxiv_papers(query: str, max_results: int = 5,
-                                     sort_by: str = "relevance",
-                                     categories: str = "") -> str:
+async def download_and_store_arxiv_papers(query: str, max_results: int = 5,
+                                           sort_by: str = "relevance",
+                                           categories: str = "") -> str:
     """Search arXiv, download PDFs, convert to markdown, and store in the vector DB.
     Fetches a larger pool of candidates from arXiv, then reranks them by semantic
     similarity to the query and only downloads the most relevant ones.
@@ -271,15 +272,18 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
             sort_order=arxiv.SortOrder.Descending,
         )
 
-        # Collect candidate metadata first (no PDF download yet)
+        # Collect candidate metadata — keep arxiv.Result objects to avoid re-fetching later
         candidates = []
+        paper_objects: dict[str, arxiv.Result] = {}
         for paper in _arxiv_client.results(search):
+            short_id = paper.get_short_id()
+            paper_objects[short_id] = paper
             candidates.append({
                 "title": paper.title,
                 "authors": [a.name for a in paper.authors],
                 "summary": paper.summary,
                 "pdf_url": paper.pdf_url,
-                "short_id": paper.get_short_id(),
+                "short_id": short_id,
                 "categories": list(paper.categories),
                 "published": paper.published.strftime("%Y-%m-%d") if paper.published else "",
             })
@@ -293,29 +297,22 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
         # Rerank by embedding similarity — only keep the most relevant papers
         top_candidates = _rerank_candidates(query, candidates, max_results)
 
-        # Now download PDFs only for the reranked top papers
+        # Download PDFs in parallel — use cached paper objects, no per-paper re-fetch
         download_dir = Path("papers")
         download_dir.mkdir(exist_ok=True)
 
-        papers = []
-        for candidate in top_candidates:
-            file_name = f"{candidate['short_id']}.pdf"
+        async def _download_one(candidate: dict) -> dict | None:
+            short_id = candidate["short_id"]
+            file_name = f"{short_id}.pdf"
             file_path = download_dir / file_name
-
-            logger.info("Downloading paper: '%s' (relevance: %.3f) → %s",
-                        candidate["title"],
-                        candidate.get("_relevance_score", 0),
-                        file_path)
-
-            # Re-fetch the paper object to download the PDF
-            paper_search = arxiv.Search(id_list=[candidate["short_id"]])
-            paper_obj = next(_arxiv_client.results(paper_search), None)
+            paper_obj = paper_objects.get(short_id)
             if paper_obj is None:
-                logger.warning("Could not re-fetch paper '%s', skipping", candidate["short_id"])
-                continue
-            paper_obj.download_pdf(dirpath=str(download_dir), filename=file_name)
-
-            papers.append({
+                logger.warning("No cached object for '%s', skipping", short_id)
+                return None
+            logger.info("Downloading paper: '%s' (relevance: %.3f) → %s",
+                        candidate["title"], candidate.get("_relevance_score", 0), file_path)
+            await asyncio.to_thread(paper_obj.download_pdf, dirpath=str(download_dir), filename=file_name)
+            return {
                 "title": candidate["title"],
                 "authors": candidate["authors"],
                 "summary": candidate["summary"],
@@ -323,13 +320,16 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
                 "pdf_url": candidate["pdf_url"],
                 "categories": candidate["categories"],
                 "published": candidate["published"],
-            })
+            }
+
+        download_results = await asyncio.gather(*[_download_one(c) for c in top_candidates])
+        papers = [p for p in download_results if p is not None]
 
         if not papers:
             return "No papers could be downloaded."
 
         db = _get_db("research-papers")
-        db.upsert_papers(papers)
+        await db.upsert_papers(papers)
 
         summaries = []
         for i, p in enumerate(papers):

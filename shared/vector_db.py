@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -74,15 +75,15 @@ class VectorDB:
     # ---- Generic operations ----
 
     def check_identifier(self, identifier: str, filter_key: str = "ticker") -> bool:
-        """Check if documents with a given identifier exist."""
-        dummy_vector = [0.0] * self._DIMENSIONS[self.provider]
-        results = self.index.query(
-            vector=dummy_vector,
-            top_k=1,
-            filter={filter_key: {"$eq": identifier}},
-            include_metadata=False,
-        )
-        return bool(results.matches)
+        """Check if documents with a given identifier exist.
+
+        Uses fetch() on a deterministic chunk ID rather than a dummy-vector query —
+        avoids a 3072-dim vector round-trip (~100-200 ms) just for an existence check.
+        The first chunk of any stored document is always keyed as '{identifier}_chunk_0'.
+        """
+        probe_id = f"{identifier}_chunk_0"
+        result = self.index.fetch(ids=[probe_id])
+        return bool(result.vectors)
 
     def upsert_chunks(self, doc_id_base: str, content: str, metadata: dict[str, Any]):
         """Chunk, embed, and upsert a single document."""
@@ -207,12 +208,18 @@ class VectorDB:
     def pdf_to_markdown(pdf_path: str) -> str:
         return pymupdf4llm.to_markdown(pdf_path)
 
-    def upsert_papers(self, papers: list[dict[str, Any]]):
-        """Convert PDFs to markdown, chunk, embed, and upsert into Pinecone."""
-        total_chunks = 0
-        for paper in papers:
+    async def upsert_papers(self, papers: list[dict[str, Any]]):
+        """Convert PDFs to markdown, chunk, embed, and upsert into Pinecone.
+
+        All PDF→markdown conversions run in parallel threads (CPU-bound via
+        pymupdf4llm).  Each paper's embedding + upsert also runs in a thread
+        so the event loop is never blocked.
+        """
+        loop = asyncio.get_running_loop()
+
+        async def _process_paper(paper: dict[str, Any]) -> int:
             paper_id = self._paper_id(paper["pdf_path"])
-            markdown = self.pdf_to_markdown(paper["pdf_path"])
+            markdown = await loop.run_in_executor(None, self.pdf_to_markdown, paper["pdf_path"])
             authors = (
                 ", ".join(paper["authors"])
                 if isinstance(paper["authors"], list)
@@ -226,7 +233,10 @@ class VectorDB:
                 "pdf_path": paper["pdf_path"],
                 "pdf_url": paper["pdf_url"],
             }
-            total_chunks += self.upsert_chunks(paper_id, markdown, metadata)
+            return await loop.run_in_executor(None, self.upsert_chunks, paper_id, markdown, metadata)
+
+        chunk_counts = await asyncio.gather(*[_process_paper(p) for p in papers])
+        total_chunks = sum(chunk_counts)
         logger.info("Upserted %d chunks for %d paper(s)", total_chunks, len(papers))
 
     def papers_exist(self, query: str) -> bool:

@@ -1,12 +1,13 @@
 """MCP server for GitHub public repository fetching. Port 8013 (dev only)."""
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import re
 
-import requests
+import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
@@ -109,7 +110,7 @@ def _validate_and_parse_url(repo_url: str) -> tuple[str, str]:
 
 
 @mcp.tool()
-def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
+async def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
     """Fetch key source files from a public GitHub repository for code analysis.
 
     Retrieves repo metadata, a full file tree, and the content of the most
@@ -135,62 +136,58 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
     max_files = max(1, min(int(max_files), _MAX_FILES_HARD_CAP))
 
     try:
-        # ── 1. Repo metadata ──
-        meta_res = requests.get(
-            f"https://api.github.com/repos/{repo_full}",
-            headers=_BASE_HEADERS,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        if meta_res.status_code == 404:
-            return f"Error: Repository not found or is private: {repo_full}"
-        if meta_res.status_code == 403:
-            return (
-                f"Error: Access denied for {repo_full}. "
-                "Only public repositories are supported."
-            )
-        if not meta_res.ok:
-            return f"Error: GitHub API returned {meta_res.status_code} for {repo_full}"
-        meta = meta_res.json()
-
-        # ── 2. Full recursive file tree ──
-        default_branch = meta.get("default_branch", "main")
-        tree_res = requests.get(
-            f"https://api.github.com/repos/{repo_full}/git/trees/{default_branch}?recursive=1",
-            headers=_BASE_HEADERS,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        if not tree_res.ok:
-            return f"Error: Failed to fetch file tree (status {tree_res.status_code})"
-
-        all_blobs = [
-            item
-            for item in tree_res.json().get("tree", [])
-            if item["type"] == "blob" and not _SKIP_PATTERN.search(item["path"])
-        ]
-        all_blobs.sort(key=lambda f: (-_file_priority(f["path"]), len(f["path"])))
-        to_fetch = all_blobs[:max_files]
-
-        # ── 3. Fetch file contents ──
-        key_files: list[dict[str, str]] = []
-        for item in to_fetch:
-            try:
-                content_res = requests.get(
-                    f"https://api.github.com/repos/{repo_full}/contents/{item['path']}",
-                    headers=_BASE_HEADERS,
-                    timeout=_REQUEST_TIMEOUT,
+        async with httpx.AsyncClient(headers=_BASE_HEADERS, timeout=_REQUEST_TIMEOUT) as client:
+            # ── 1. Repo metadata ──
+            meta_res = await client.get(f"https://api.github.com/repos/{repo_full}")
+            if meta_res.status_code == 404:
+                return f"Error: Repository not found or is private: {repo_full}"
+            if meta_res.status_code == 403:
+                return (
+                    f"Error: Access denied for {repo_full}. "
+                    "Only public repositories are supported."
                 )
-                if not content_res.ok:
-                    continue
-                file_json = content_res.json()
-                if file_json.get("encoding") != "base64":
-                    continue
-                raw = base64.b64decode(file_json["content"]).decode("utf-8", errors="replace")
-                if len(raw) > _MAX_FILE_BYTES:
-                    raw = raw[:_MAX_FILE_BYTES] + f"\n\n... [truncated at {_MAX_FILE_BYTES} bytes]"
-                key_files.append({"path": item["path"], "content": raw})
-            except Exception as exc:
-                logger.warning("Skipping %s — %s", item["path"], exc)
-                continue
+            if not meta_res.is_success:
+                return f"Error: GitHub API returned {meta_res.status_code} for {repo_full}"
+            meta = meta_res.json()
+
+            # ── 2. Full recursive file tree ──
+            default_branch = meta.get("default_branch", "main")
+            tree_res = await client.get(
+                f"https://api.github.com/repos/{repo_full}/git/trees/{default_branch}?recursive=1",
+            )
+            if not tree_res.is_success:
+                return f"Error: Failed to fetch file tree (status {tree_res.status_code})"
+
+            all_blobs = [
+                item
+                for item in tree_res.json().get("tree", [])
+                if item["type"] == "blob" and not _SKIP_PATTERN.search(item["path"])
+            ]
+            all_blobs.sort(key=lambda f: (-_file_priority(f["path"]), len(f["path"])))
+            to_fetch = all_blobs[:max_files]
+
+            # ── 3. Fetch file contents in parallel ──
+            async def _fetch_file(item: dict) -> dict | None:
+                try:
+                    content_res = await client.get(
+                        f"https://api.github.com/repos/{repo_full}/contents/{item['path']}",
+                    )
+                    if not content_res.is_success:
+                        return None
+                    file_json = content_res.json()
+                    if file_json.get("encoding") != "base64":
+                        return None
+                    raw = base64.b64decode(file_json["content"]).decode("utf-8", errors="replace")
+                    if len(raw) > _MAX_FILE_BYTES:
+                        raw = raw[:_MAX_FILE_BYTES] + f"\n\n... [truncated at {_MAX_FILE_BYTES} bytes]"
+                    return {"path": item["path"], "content": raw}
+                except Exception as exc:
+                    logger.warning("Skipping %s — %s", item["path"], exc)
+                    return None
+
+            # asyncio.gather preserves input order, so sort order is maintained
+            results = await asyncio.gather(*[_fetch_file(item) for item in to_fetch])
+            key_files = [r for r in results if r is not None]
 
         # ── 4. Build compact summary ──
         all_paths = [item["path"] for item in all_blobs[:200]]
@@ -220,9 +217,9 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
         }
         return json.dumps(result)
 
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         return f"Error: Request timed out fetching {repo_full}."
-    except requests.exceptions.ConnectionError as exc:
+    except httpx.ConnectError as exc:
         return f"Error: Connection failed for {repo_full}: {exc}"
     except Exception as exc:
         logger.error("Unexpected error fetching repo %s: %s", repo_full, exc)

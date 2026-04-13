@@ -3,7 +3,7 @@
 import logging
 import time
 
-import requests
+import httpx
 import yfinance as yf
 from cachetools import cached, TTLCache
 from dotenv import load_dotenv
@@ -432,7 +432,7 @@ def get_macro_indicators() -> str:
 
 
 @mcp.tool()
-def get_fii_dii_flows(days: int = 30) -> str:
+async def get_fii_dii_flows(days: int = 30) -> str:
     """Fetch FII/DII equity trading activity from NSE India for the last N trading days.
     Returns gross buy, gross sell, and net investment values in crores INR.
     FII (Foreign Institutional Investors) and DII (Domestic Institutional Investors) flows
@@ -446,8 +446,7 @@ def get_fii_dii_flows(days: int = 30) -> str:
 
     logger.info("Fetching FII/DII flows for last %d days", days)
     try:
-        session = requests.Session()
-        session.headers.update({
+        _NSE_HEADERS = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -456,14 +455,11 @@ def get_fii_dii_flows(days: int = 30) -> str:
             "Accept": "application/json, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.nseindia.com/",
-        })
-        # Initialize NSE session to get cookies
-        session.get("https://www.nseindia.com", timeout=15)
-
-        resp = session.get(
-            "https://www.nseindia.com/api/fiidiiTradeReact",
-            timeout=15,
-        )
+        }
+        async with httpx.AsyncClient(headers=_NSE_HEADERS, timeout=15, follow_redirects=True) as client:
+            # Initialize NSE session to get cookies
+            await client.get("https://www.nseindia.com")
+            resp = await client.get("https://www.nseindia.com/api/fiidiiTradeReact")
         resp.raise_for_status()
         data = resp.json()
 

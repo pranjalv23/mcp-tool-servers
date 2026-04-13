@@ -1,17 +1,17 @@
 """Combined MCP server — all tools on a single port."""
 
+import asyncio
 import json
 import logging
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import arxiv
 import base64
 import re
-import requests
+import httpx
 import yfinance as yf
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -715,9 +715,9 @@ def _rerank_candidates(query: str, candidates: list[dict], top_n: int) -> list[d
 
 
 @mcp.tool(annotations={"destructiveHint": False})
-def download_and_store_arxiv_papers(query: str, max_results: int = 5,
-                                     sort_by: str = "relevance",
-                                     categories: str = "") -> str:
+async def download_and_store_arxiv_papers(query: str, max_results: int = 5,
+                                           sort_by: str = "relevance",
+                                           categories: str = "") -> str:
     """Search arXiv, download PDFs, convert to markdown, and store in the vector DB.
     Fetches a larger pool of candidates from arXiv, then reranks them by semantic
     similarity to the query and only downloads the most relevant ones.
@@ -752,14 +752,18 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
             sort_order=arxiv.SortOrder.Descending,
         )
 
+        # Cache paper objects keyed by short_id — avoids N+1 re-fetch during download
         candidates = []
+        paper_objects: dict[str, arxiv.Result] = {}
         for paper in _arxiv_client.results(search):
+            short_id = paper.get_short_id()
+            paper_objects[short_id] = paper
             candidates.append({
                 "title": paper.title,
                 "authors": [a.name for a in paper.authors],
                 "summary": paper.summary,
                 "pdf_url": paper.pdf_url,
-                "short_id": paper.get_short_id(),
+                "short_id": short_id,
                 "categories": list(paper.categories),
                 "published": paper.published.strftime("%Y-%m-%d") if paper.published else "",
             })
@@ -775,24 +779,18 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
         download_dir = Path("papers")
         download_dir.mkdir(exist_ok=True)
 
-        papers = []
-        for candidate in top_candidates:
-            file_name = f"{candidate['short_id']}.pdf"
+        async def _download_one(candidate: dict) -> dict | None:
+            short_id = candidate["short_id"]
+            file_name = f"{short_id}.pdf"
             file_path = download_dir / file_name
-
-            logger.info("Downloading paper: '%s' (relevance: %.3f) → %s",
-                        candidate["title"],
-                        candidate.get("_relevance_score", 0),
-                        file_path)
-
-            paper_search = arxiv.Search(id_list=[candidate["short_id"]])
-            paper_obj = next(_arxiv_client.results(paper_search), None)
+            paper_obj = paper_objects.get(short_id)
             if paper_obj is None:
-                logger.warning("Could not re-fetch paper '%s', skipping", candidate["short_id"])
-                continue
-            paper_obj.download_pdf(dirpath=str(download_dir), filename=file_name)
-
-            papers.append({
+                logger.warning("No cached object for '%s', skipping", short_id)
+                return None
+            logger.info("Downloading paper: '%s' (relevance: %.3f) → %s",
+                        candidate["title"], candidate.get("_relevance_score", 0), file_path)
+            await asyncio.to_thread(paper_obj.download_pdf, dirpath=str(download_dir), filename=file_name)
+            return {
                 "title": candidate["title"],
                 "authors": candidate["authors"],
                 "summary": candidate["summary"],
@@ -800,13 +798,16 @@ def download_and_store_arxiv_papers(query: str, max_results: int = 5,
                 "pdf_url": candidate["pdf_url"],
                 "categories": candidate["categories"],
                 "published": candidate["published"],
-            })
+            }
+
+        download_results = await asyncio.gather(*[_download_one(c) for c in top_candidates])
+        papers = [p for p in download_results if p is not None]
 
         if not papers:
             return "No papers could be downloaded."
 
         db = _get_db("research-papers")
-        db.upsert_papers(papers)
+        await db.upsert_papers(papers)
 
         summaries = []
         for i, p in enumerate(papers):
@@ -880,7 +881,7 @@ def _gh_validate_url(repo_url: str) -> tuple[str, str]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
-def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
+async def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
     """Fetch key source files from a public GitHub repository for code analysis.
 
     Args:
@@ -900,64 +901,53 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
     max_files = max(1, min(int(max_files), 60))
 
     try:
-        meta_res = requests.get(
-            f"https://api.github.com/repos/{repo_full}",
-            headers=_GH_HEADERS, timeout=_GH_TIMEOUT,
-        )
-        if meta_res.status_code == 404:
-            return f"Error: Repository not found or is private: {repo_full}"
-        if meta_res.status_code == 403:
-            return f"Error: Access denied for {repo_full}. Only public repositories are supported."
-        if not meta_res.ok:
-            return f"Error: GitHub API returned {meta_res.status_code} for {repo_full}"
-        meta = meta_res.json()
+        async with httpx.AsyncClient(headers=_GH_HEADERS, timeout=_GH_TIMEOUT) as client:
+            meta_res = await client.get(f"https://api.github.com/repos/{repo_full}")
+            if meta_res.status_code == 404:
+                return f"Error: Repository not found or is private: {repo_full}"
+            if meta_res.status_code == 403:
+                return f"Error: Access denied for {repo_full}. Only public repositories are supported."
+            if not meta_res.is_success:
+                return f"Error: GitHub API returned {meta_res.status_code} for {repo_full}"
+            meta = meta_res.json()
 
-        default_branch = meta.get("default_branch", "main")
-        tree_res = requests.get(
-            f"https://api.github.com/repos/{repo_full}/git/trees/{default_branch}?recursive=1",
-            headers=_GH_HEADERS, timeout=_GH_TIMEOUT,
-        )
-        if not tree_res.ok:
-            return f"Error: Failed to fetch file tree (status {tree_res.status_code})"
+            default_branch = meta.get("default_branch", "main")
+            tree_res = await client.get(
+                f"https://api.github.com/repos/{repo_full}/git/trees/{default_branch}?recursive=1",
+            )
+            if not tree_res.is_success:
+                return f"Error: Failed to fetch file tree (status {tree_res.status_code})"
 
-        all_blobs = [
-            item for item in tree_res.json().get("tree", [])
-            if item["type"] == "blob" and not _GH_SKIP.search(item["path"])
-        ]
-        all_blobs.sort(key=lambda f: (-_gh_file_priority(f["path"]), len(f["path"])))
+            all_blobs = [
+                item for item in tree_res.json().get("tree", [])
+                if item["type"] == "blob" and not _GH_SKIP.search(item["path"])
+            ]
+            all_blobs.sort(key=lambda f: (-_gh_file_priority(f["path"]), len(f["path"])))
 
-        def _fetch_file(item: dict) -> dict | None:
-            """Fetch a single file from GitHub. Returns {path, content} or None on failure."""
-            try:
-                cr = requests.get(
-                    f"https://api.github.com/repos/{repo_full}/contents/{item['path']}",
-                    headers=_GH_HEADERS, timeout=_GH_TIMEOUT,
-                )
-                if not cr.ok:
+            async def _fetch_file(item: dict) -> dict | None:
+                """Fetch a single file from GitHub. Returns {path, content} or None on failure."""
+                try:
+                    cr = await client.get(
+                        f"https://api.github.com/repos/{repo_full}/contents/{item['path']}",
+                    )
+                    if not cr.is_success:
+                        return None
+                    fj = cr.json()
+                    if fj.get("encoding") != "base64":
+                        return None
+                    raw = base64.b64decode(fj["content"]).decode("utf-8", errors="replace")
+                    if len(raw) > _GH_MAX_BYTES:
+                        raw = raw[:_GH_MAX_BYTES] + f"\n\n... [truncated at {_GH_MAX_BYTES} bytes]"
+                    return {"path": item["path"], "content": raw}
+                except Exception as exc:
+                    logger.warning("Skipping %s: %s", item["path"], exc)
                     return None
-                fj = cr.json()
-                if fj.get("encoding") != "base64":
-                    return None
-                raw = base64.b64decode(fj["content"]).decode("utf-8", errors="replace")
-                if len(raw) > _GH_MAX_BYTES:
-                    raw = raw[:_GH_MAX_BYTES] + f"\n\n... [truncated at {_GH_MAX_BYTES} bytes]"
-                return {"path": item["path"], "content": raw}
-            except Exception as exc:
-                logger.warning("Skipping %s: %s", item["path"], exc)
-                return None
 
-        targets = all_blobs[:max_files]
-        key_files: list[dict[str, str]] = []
-        # Fetch files concurrently — up to 10 parallel GitHub API calls
-        with ThreadPoolExecutor(max_workers=min(10, len(targets))) as executor:
-            futures = {executor.submit(_fetch_file, item): item for item in targets}
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    key_files.append(result)
-        # Restore priority order (parallel execution loses original sort order)
-        path_order = {item["path"]: idx for idx, item in enumerate(targets)}
-        key_files.sort(key=lambda f: path_order.get(f["path"], 999))
+            targets = all_blobs[:max_files]
+            # Fetch all files concurrently via asyncio.gather — no thread pool needed
+            results = await asyncio.gather(*[_fetch_file(item) for item in targets])
+            # Preserve priority order (already sorted; gather maintains index order)
+            key_files = [r for r in results if r is not None]
 
         all_paths = [item["path"] for item in all_blobs[:200]]
         language = meta.get("language") or "unknown"
@@ -987,9 +977,9 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
             "total_files": len(all_blobs),
         })
 
-    except requests.exceptions.Timeout:
+    except httpx.TimeoutException:
         return f"Error: Request timed out fetching {repo_full}."
-    except requests.exceptions.ConnectionError as exc:
+    except httpx.ConnectError as exc:
         return f"Error: Connection failed for {repo_full}: {exc}"
     except Exception as exc:
         logger.error("Unexpected error fetching repo %s: %s", repo_full, exc)
