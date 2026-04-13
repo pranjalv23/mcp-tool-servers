@@ -78,7 +78,7 @@ def _get_db(index_name: str) -> VectorDB:
 
 # ── Web Search Tools ──────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def tavily_quick_search(query: str, max_results: int = 3) -> str:
     """Perform a quick web search across the internet. Returns synthesized answers and snippets.
     Ideal for news, quick fact-checking, and broad questions."""
@@ -103,7 +103,7 @@ def tavily_quick_search(query: str, max_results: int = 3) -> str:
         return f"Search failed: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def firecrawl_deep_scrape(url: str) -> str:
     """Deep scrape a specific URL to extract its full markdown content.
     Use when you need to read a long-form article, report, or earnings transcript.
@@ -155,7 +155,7 @@ _INDIAN_TICKER_ALIASES: dict[str, str] = {
 }
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def resolve_indian_ticker(company_name_or_symbol: str) -> str:
     """Resolve an Indian company name, abbreviation, or partial symbol to the correct
     NSE ticker (with .NS suffix) for use with all other finance tools.
@@ -214,7 +214,7 @@ def resolve_indian_ticker(company_name_or_symbol: str) -> str:
             "Try the explicit NSE symbol directly."
         )
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def get_ticker_data(ticker: str) -> str:
     """Get basic market data and company information for a given ticker symbol.
     For Indian stocks use .NS (NSE) or .BO (BSE) suffix, e.g., 'RELIANCE.NS'.
@@ -236,7 +236,7 @@ def get_ticker_data(ticker: str) -> str:
         return f"Failed to fetch data for {ticker}: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def get_bse_nse_reports(ticker: str) -> str:
     """Fetch raw quarterly and yearly financial reports (Income Statement, Balance Sheet, Cash Flow)
     for a given ticker (use .NS or .BO suffix for Indian stocks).
@@ -269,7 +269,7 @@ def get_bse_nse_reports(ticker: str) -> str:
         return f"Failed to fetch reports for {ticker}: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d", end_date: str | None = None) -> str:
     """Get price history summary and trend analysis for a ticker symbol.
     Returns multi-timeframe returns, monthly price series, moving averages, and volume.
@@ -329,7 +329,7 @@ def get_historical_ohlcv(ticker: str, period: str = "1y", interval: str = "1d", 
         return f"Failed to fetch price history for {ticker}: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def get_macro_indicators() -> str:
     """Fetch key Indian and global macro market indicators.
     Returns USD/INR, Brent Crude, Gold, US 10Y Treasury yield, Nifty 50, Sensex,
@@ -390,7 +390,7 @@ def get_macro_indicators() -> str:
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def get_fii_dii_flows(days: int = 30) -> str:
     """Fetch FII/DII equity trading activity from NSE India for the last N trading days.
     Returns gross buy, gross sell, and net investment values in crores INR.
@@ -452,7 +452,7 @@ def get_fii_dii_flows(days: int = 30) -> str:
 
 # ── Financial Education Calculators ──────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def calculate_sip_returns(
     monthly_investment: float,
     annual_return_rate: float,
@@ -484,7 +484,7 @@ def calculate_sip_returns(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def calculate_goal_sip(
     target_amount: float,
     annual_return_rate: float,
@@ -511,7 +511,7 @@ def calculate_goal_sip(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def calculate_inflation_impact(
     current_value: float,
     inflation_rate: float,
@@ -540,7 +540,7 @@ def calculate_inflation_impact(
 
 # ── Vector DB Tools ───────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def check_in_vector_db(identifier: str, index_name: str) -> str:
     """Check if documents with a given identifier exist in the vector DB.
     For financial reports, identifier is a ticker (e.g., 'RELIANCE.NS') and index_name is 'financial-reports'.
@@ -559,7 +559,7 @@ def check_in_vector_db(identifier: str, index_name: str) -> str:
         return f"Error checking vector DB: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": False, "idempotentHint": True})
 def upsert_to_vector_db(data: str, metadata_json: str, index_name: str) -> str:
     """Upsert a document to the vector DB. data is the text content, metadata_json is a JSON string
     of metadata fields, and index_name is the target Pinecone index."""
@@ -575,7 +575,7 @@ def upsert_to_vector_db(data: str, metadata_json: str, index_name: str) -> str:
         return f"Upsert failed: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def retrieve_from_vector_db(query: str, index_name: str, filter_key: str = "",
                             filter_value: str = "", top_k: int = 5) -> str:
     """Retrieve relevant document chunks from the vector DB using semantic search.
@@ -604,7 +604,7 @@ def retrieve_from_vector_db(query: str, index_name: str, filter_key: str = "",
         return f"Retrieval failed: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": False, "idempotentHint": True})
 def add_financial_reports_to_db(ticker: str) -> str:
     """Fetch quarterly and yearly financial reports for a ticker and store them in the vector DB.
     Always check if reports exist first with check_in_vector_db."""
@@ -649,7 +649,7 @@ def add_financial_reports_to_db(ticker: str) -> str:
         return f"Failed to add reports: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def check_papers_in_db(query: str) -> str:
     """Check if relevant research papers exist in the vector DB for a given query."""
     logger.info("Checking papers in DB — query='%s'", query[:80])
@@ -664,7 +664,7 @@ def check_papers_in_db(query: str) -> str:
         return f"Error checking papers: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def retrieve_papers(query: str, top_k: int = 5) -> str:
     """Retrieve relevant research paper chunks from the vector DB using semantic search."""
     logger.info("Retrieving papers — query='%s', top_k=%d", query[:80], top_k)
@@ -714,7 +714,7 @@ def _rerank_candidates(query: str, candidates: list[dict], top_n: int) -> list[d
     return reranked
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": False})
 def download_and_store_arxiv_papers(query: str, max_results: int = 5,
                                      sort_by: str = "relevance",
                                      categories: str = "") -> str:
@@ -879,7 +879,7 @@ def _gh_validate_url(repo_url: str) -> tuple[str, str]:
     return owner, repo
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
     """Fetch key source files from a public GitHub repository for code analysis.
 
@@ -996,17 +996,22 @@ def fetch_github_repo(repo_url: str, max_files: int = 40) -> str:
         return f"Error: Unexpected failure fetching {repo_full}: {exc}"
 
 
-# Expose the ASGI app so uvicorn can import it directly (enables --workers).
-# Each worker handles independent tool-call HTTP requests so no shared session
-# state is needed — multi-worker is safe for the streamable-http transport.
-app = mcp.http_app()
+# Factory function required for uvicorn multi-worker mode.
+# Each worker calls create_app() after forking, which creates a fresh
+# StreamableHTTPSessionManager per worker. Sharing a single app instance
+# (module-level) across forked workers causes the second worker to hit
+# StreamableHTTPSessionManager's "can only be called once" guard and exit cleanly.
+def create_app():
+    return mcp.http_app()
+
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8010))
     workers = int(os.getenv("WEB_CONCURRENCY", 1))
     uvicorn.run(
-        "server:app",
+        "server:create_app",
+        factory=True,
         host="0.0.0.0",
         port=port,
         workers=workers,
